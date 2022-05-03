@@ -17,6 +17,7 @@
 
 #define BUFF_SIZE 4096
 #define TRUE 1
+#define FALSE 0
 #define DB_HOST "127.0.0.1"
 #define DB_USER "root"
 #define DB_PASSWD "1234"
@@ -47,23 +48,15 @@ struct ifreq ifr;
 int CountIp(char * start, char * end)
 {
     //몇개의 ip갯수를 할당할 수 있는지
-    int i = 0; int h = 0;  char tmp[5];  char tmp2[5];
-    for(; *start != '\0'; start++);
-    for(;  *start != '.'; start--);
-    for(++start; *start != '\0'; start++)
-    {
-        tmp[i] = *start;
-        i++;
-    }
-
-    for(; *end != '\0'; end++);
-    for(;  *end != '.'; end--);
-    for(++end; *end != '\0'; end++)
-    {
-        tmp2[h] = *end;
-        h++;
-    }
-    return atoi(tmp2)-atoi(tmp);
+    char * s = start;
+    char * e = end;
+    
+    sprintf(buf, "SELECT INET_ATON('%s') - INET_ATON('%s')", e, s);
+    mysql_query(connection, buf);
+    result = mysql_store_result(connection);
+    row = mysql_fetch_row(result);
+    mysql_free_result(result);   
+    return atoi(row[0]);
 }
 
 void PrintManual()
@@ -81,6 +74,9 @@ void PrintManual()
     printf("\t\t --입력한 네트워크 인터페이스 카드에 대해 설정된 네트워크 정보를 보여준다.\n");
     printf("\t [NETWORK INTERFACE CARD] [start | stop] \n");
     printf("\t\t --입력한 네트워크 인터페이스 카드에 대한 DHCP 서비스를 시작하고 중단한다.\n");
+    printf("\t [NETWORK INTERFACE CARD] --status \n");
+    printf("\t\t --입력한 네트워크 인터페이스 카드에 대한 DHCP 서비스의 동작여부를 알 수 있다.\n");
+
 
     exit(1);
 }
@@ -124,9 +120,32 @@ void checking_ip_time()
     }
 }
 
+int dhcp_islive(char *argv[])
+{
+    
+    sprintf(buf, "SELECT PID FROM pid_table WHERE NIC = '%s'", argv[1]);
+    if(mysql_query(connection, buf));
+    result = mysql_store_result(connection);
+    row = mysql_fetch_row(result);
+    mysql_free_result(result);    
+
+    char process[50];
+    sprintf(process, "/proc/%s/status", row[0]);
+    FILE *fp = fopen(process, "r");
+    if(fp == NULL)
+    {
+        fprintf(stdout, "'%s'에 대한 DHCP SERVICE가 예상치 못하게 종료되었습니다.\nstop 옵션을 이용하여 정상적으로 종료 후 다시 시작하여 주시기 바랍니다.\n", argv[1]);
+        return FALSE;
+    }  
+    fclose(fp);
+
+    return 2;
+}
+
 
 void search_ip_list(char *argv[])
 {
+    checking_ip_time();
     if(argv[2] == NULL)
     {
         printf("조회할 네트워크 인터페이스명을 입력해주세요\n");
@@ -156,14 +175,20 @@ void search_ip_list(char *argv[])
     }
 }
 
+//사용되었던 ip 구하기
 void search_used_ip()
 {
+    checking_ip_time();
     if(mysql_query(connection, "SELECT * FROM backup order by end"))
     {
         fprintf(stderr, "사용한 ip조회 실패: '%s'\n", mysql_error(&conn));
         exit(1);
     }
     result = mysql_store_result(connection);
+    query = mysql_num_rows(result); //20개 이상이면 삭제 update
+    if(query > 20)
+        mysql_query(connection, "DELETE * FROM backup ORDER BY end DESC LIMIT 1");
+        
     printf("----------20분 내에 할당 해제된 ip list입니다----------\n");
     printf("%- 3s\t%-15s\t%-15s\t\t%-15s\t\t%-15s\t\t%15s\n", "순서", "NIC", "ip주소", "MAC주소", "시작 시간", "종료 시간");
     int i = 1;
@@ -188,6 +213,7 @@ void search_used_ip()
     exit(1);
 }
 
+//네트워크 정보 초기화
 void delete_network_setting(char * argv[])
 {
     char answer;
@@ -216,6 +242,7 @@ void delete_network_setting(char * argv[])
     exit(1); 
 }
 
+//설정한 네트워크 정보 조회
 void search_network_setting(char *argv[])
 {
     if(argv[2] == NULL)
@@ -236,6 +263,7 @@ void search_network_setting(char *argv[])
         query = mysql_num_rows(result);
         row = mysql_fetch_row(result);
         mysql_free_result(result);
+        
         if(query == 0)
         {
             printf("%s에 대한 네트워크 설정이 아직 안되었습니다\n", argv[2]);
@@ -259,6 +287,7 @@ void search_network_setting(char *argv[])
     }
 }
 
+//네트워크 정보 세팅
 void network_setting(char *argv[])
 {
     //Config file이 존재할때
@@ -349,8 +378,8 @@ InputNetwork:
         else
         {
 
-            sprintf(buf, "SELECT INET_NTOA(ip) FROM tmp WHERE NIC = '%s' ORDER BY ip DESC LIMIT 1", argv[2]);
-            //char *select_query = "SELECT INET_NTOA(ip) FROM tmp ORDER BY ip DESC LIMIT 1";
+            sprintf(buf, "SELECT INET_NTOA(ip) FROM tmp WHERE NIC = '%s' ORDER BY (ip) DESC LIMIT 1", argv[2]);
+            
             if(mysql_query(connection, buf))
             {
                 fprintf(stderr, "SELECT ERROR: %s", mysql_error(&conn));
@@ -360,8 +389,6 @@ InputNetwork:
             result = mysql_store_result(connection);
             row = mysql_fetch_row(result);
             mysql_free_result(result);
-            memset(buf, 0, sizeof(buf));
-            //buf[0] = '\0';
 
             sprintf(buf, "INSERT INTO ip_list(NIC, ip_addr, network, subnet, gateway, name_server, default_lease_time, Assigned) VALUES" " ('%s', '%s', '%s','%s','%s','%s','%s','%d')",argv[2],  row[0], network, subnet, gateway, name_server, default_lease_time,0);
             if(mysql_query(connection, buf) != 0)
@@ -370,8 +397,9 @@ InputNetwork:
                 exit(1);
             }
         }
-        // insert ip_list
-        sprintf(buf,  "INSERT INTO tmp(ip, NIC) VALUES((SELECT INET_ATON(ip_addr) FROM ip_list WHERE NIC = '%s' ORDER BY INET_ATON(ip_addr) DESC LIMIT 1)+1, '%s')", argv[2], argv[2]);
+ 
+       // insert ip_list
+        sprintf(buf,  "INSERT INTO tmp(ip, NIC) VALUES((SELECT INET_ATON(ip_addr) FROM ip_list WHERE NIC = '%s'  order by inet_aton(ip_addr) DESC LIMIT 1)+ 1, '%s')", argv[2],argv[2]);
         if(mysql_query(connection, buf))
         {
             fprintf(stderr, "INSERT ERROR: %s\n", mysql_error(&conn));
@@ -387,8 +415,30 @@ InputNetwork:
     }
 }
 
+void dhcp_status(char *argv[])
+{
+    if(dhcp_islive(argv) == FALSE)
+        exit(0);
+    else{
+    sprintf(buf, "SELECT PID FROM pid_table WHERE NIC = '%s'", argv[1]);
+    if(mysql_query(connection, buf))
 
+    {
+        fprintf(stderr, "STATUS ERROR: '%s'\n", mysql_error(&conn));
+        exit(0);
+    }
+    result = mysql_store_result(connection);
+    query = mysql_num_rows(result);
+    
+    if(query == 0)
+        printf("DHCP IS NOT RUNNING\n");
+    else
+        printf("DHCP IS RUNNING\n");
+    
+    }
 
+    return;
+}
 
 void dhcp_start(char *argv[])
 {
@@ -431,6 +481,8 @@ void dhcp_start(char *argv[])
     while(1) {    
         //연결이 끊긴 패킷이라도 테이블에 남아있을 수 있기 때문   
         checking_ip_time();
+      //  if(dhcp_islive(argv) == FALSE)
+         //   continue;
 
         str_len = recvfrom(server_socket, buff_rcv , BUFF_SIZE, 0, (struct sockaddr *)&client_addr, &client_size);  
         //SETTING NIC DEVICE
@@ -459,7 +511,7 @@ void dhcp_start(char *argv[])
             if(buff_rcv[240] == DHCP_MESSAGE && buff_rcv[242] == DHCP_DISCOVER)
             {
                 memset(buf, 0, sizeof(buf));
-                sprintf(buf, "SELECT * FROM ip_list WHERE NIC = '%s' AND Assigned = 0 LIMIT 1", argv[1]);//할당 되지 않은 ip중 가장 첫번 째  
+                sprintf(buf, "SELECT * FROM ip_list WHERE NIC = '%s' AND Assigned = 0 ORDER BY INET_ATON(ip_addr) LIMIT 1", argv[1]);//할당 되지 않은 ip중 가장 첫번 째  
                 mysql_query(connection,buf);
                 result = mysql_store_result(connection);
                 query = mysql_num_rows(result);
@@ -493,7 +545,7 @@ void dhcp_start(char *argv[])
 
 
                 bootp->bp_op = BOOT_REPLY;
-                bootp->bp_yiaddr = inet_addr(db_insert_ip);   //할당 가능 ip중 첫번째 
+                bootp->bp_yiaddr = inet_addr(db_insert_ip);  
 
                 //DHCP MESSAGE TYPE
                 bootp->dhcp_message.opt_type = DHCP_MESSAGE;
@@ -617,7 +669,7 @@ void dhcp_start(char *argv[])
                 else if(strcmp(inet_ntoa(client_addr.sin_addr),"0.0.0.0") == 0)
                 {
                     //REQUEST
-                    sprintf(buf, "SELECT * FROM ip_list WHERE NIC = '%s' AND Assigned = 0 LIMIT 1", argv[1]);
+                    sprintf(buf, "SELECT * FROM ip_list WHERE NIC = '%s' AND Assigned = 0 ORDER BY INET_ATON(ip_addr) LIMIT 1", argv[1]);
                     mysql_query(connection,buf);
                     result = mysql_store_result(connection);
                     query = mysql_num_rows(result);
@@ -631,7 +683,7 @@ void dhcp_start(char *argv[])
                     char *db_insert_lease = row[7];
 
                     bootp->bp_op = BOOT_REPLY;
-                    bootp->bp_yiaddr = inet_addr(db_insert_ip);   //할당 가능 ip중 첫번째 
+                    bootp->bp_yiaddr = inet_addr(db_insert_ip);  
 
                     //DHCP MESSAGE TYPE
                     bootp->dhcp_message.opt_type = DHCP_MESSAGE;
@@ -671,7 +723,7 @@ void dhcp_start(char *argv[])
 
 
                     int value = sendto(server_socket, buff_rcv, str_len, 0, (struct sockaddr *)&send_addr, sizeof(send_addr));
-                    //데이터가 성공적으로 보내졌으면 DB 업데이트  ///////////////////////mac addr modify
+                    //데이터가 성공적으로 보내졌으면 DB 업데이트
                     if(value > 0) 
                     {
                         sprintf(buf," UPDATE ip_list SET MAC_addr = '%s', start = now(),end = DATE_ADD(now(), INTERVAL CONVERT((SELECT default_lease_time FROM ip_list where NIC = '%s' LIMIT 1 ), UNSIGNED) SECOND), Assigned = 1 WHERE NIC = '%s' AND  ip_addr = (SELECT ip_addr FROM ip_list WHERE Assigned = 0  AND NIC = '%s' LIMIT 1)",client_mac_addr,argv[1], argv[1], argv[1]);
@@ -694,7 +746,7 @@ void dhcp_start(char *argv[])
                     fprintf(stderr, "INSERT backup ERROR: '%s;\n", mysql_error(&conn));
                     exit(1);
                 } 
-                memset(buf, 0,sizeof(buf));
+        //        memset(buf, 0,sizeof(buf));
                 result = mysql_store_result(connection);
                 row = mysql_fetch_row(result); 
                 mysql_free_result(result);
@@ -725,24 +777,41 @@ int is_setting(char *argv[])
     return query;         
 }
 
-int daemon_start()
+int daemon_start(char *argv[])
 {
     pid_t pid; int fd;  int pid_value;
+    
     if((pid = fork()) < 0)
         return -1;
     else if(pid != 0) 
         exit(0);
+    //이미 실행중인지 여부 판단
+   // if(dhcp_islive(argv) == FALSE)
+      //  exit(0);
+    sprintf(buf, "SELECT NIC FROM pid_table WHERE NIC = '%s' LIMIT 1", argv[1]);
+    mysql_query(connection, buf);
+    result = mysql_store_result(connection);
+    query = mysql_num_rows(result);
+    mysql_free_result(result);
+    if( query != 0) 
+    {
+        printf("이미 %s에 대한 DHCP SERVICE가 동작중입니다\n", argv[1]);
+        exit(0);
+    }
+    
     printf( "DHCP 서비스를 시작합니다\n");
     pid_value = getpid(); //DHCP PROCESS
     setsid();
     chdir("/");
     fd = open("dev/null", O_RDWR);
-    dup2(fd,1); dup2(fd,2);dup2(fd,0);
+    dup2(fd,2);dup2(fd,0);
     close(fd);
     umask(0);
     return pid_value;
 }
 
+
+//해당 인터페이스 카드의 PID를 넣어놓는다.서비스를 종룔할 때 해당 PID값을 죽임
 void insert_pid(int value, char *argv[])
 {
 
@@ -775,7 +844,6 @@ void dhcp_stop(char *argv[])
     kill( atoi(str), SIGTERM);
     sprintf(buf, "delete from pid_table where NIC = '%s'", argv[1]);
     mysql_query(connection, buf);
-
 }
 
 
@@ -796,7 +864,7 @@ int main(int argc, char *argv[])
                 if(num != 0) 
                 { 
                     int db_pid;
-                    if((db_pid = daemon_start()) != 0)
+                    if((db_pid = daemon_start(argv)) != 0)
                     {
                         insert_pid(db_pid, argv);
                         dhcp_start(argv);
@@ -812,6 +880,8 @@ int main(int argc, char *argv[])
             {
                 dhcp_stop(argv);
             }
+            else if(strcmp(argv[2], "--status") == 0)
+                dhcp_status(argv);
         }
 
 
@@ -832,9 +902,8 @@ int main(int argc, char *argv[])
             PrintManual();
         else if(strcmp(argv[1], "-c") == 0)
             network_setting(argv);
-
-
     }
+            
     else
         printf("DHCP 서비스를 이용할 인터페이스 카드명을 입력해주세요\n");
     return 0;
