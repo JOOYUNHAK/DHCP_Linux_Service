@@ -18,6 +18,7 @@
 #define BUFF_SIZE 4096
 #define TRUE 1
 #define FALSE 0
+#define ERROR 3
 #define DB_HOST "127.0.0.1"
 #define DB_USER "root"
 #define DB_PASSWD "1234"
@@ -126,20 +127,24 @@ int dhcp_islive(char *argv[])
     sprintf(buf, "SELECT PID FROM pid_table WHERE NIC = '%s'", argv[1]);
     if(mysql_query(connection, buf));
     result = mysql_store_result(connection);
+    query = mysql_num_rows(result);
     row = mysql_fetch_row(result);
     mysql_free_result(result);    
 
-    char process[50];
-    sprintf(process, "/proc/%s/status", row[0]);
-    FILE *fp = fopen(process, "r");
-    if(fp == NULL)
+    if(query != 0)
     {
-        fprintf(stdout, "'%s'에 대한 DHCP SERVICE가 예상치 못하게 종료되었습니다.\nstop 옵션을 이용하여 정상적으로 종료 후 다시 시작하여 주시기 바랍니다.\n", argv[1]);
+        char process[50];
+        sprintf(process, "/proc/%s/status", row[0]);
+        FILE *fp = fopen(process, "r");
+        if(fp == NULL)
+        {
+            return ERROR;
+        }  
+        fclose(fp);
+    return TRUE;
+    }
+    else if( query == 0)
         return FALSE;
-    }  
-    fclose(fp);
-
-    return 2;
 }
 
 
@@ -417,26 +422,17 @@ InputNetwork:
 
 void dhcp_status(char *argv[])
 {
-    if(dhcp_islive(argv) == FALSE)
-        exit(0);
-    else{
-    sprintf(buf, "SELECT PID FROM pid_table WHERE NIC = '%s'", argv[1]);
-    if(mysql_query(connection, buf))
-
+    int state = dhcp_islive(argv);
+    if(state == FALSE )
+        printf("STATUS: \033[33m inActive (DEAD) \033[0m\n");
+    else if(state == ERROR)
     {
-        fprintf(stderr, "STATUS ERROR: '%s'\n", mysql_error(&conn));
-        exit(0);
+        printf("STATUS: \033[31m inActive (ERROR) \033[0m\n");
+        fprintf(stdout, "에러 원인: %s에 대한 DHCP SERVICE가 예상치 못하게 종료된 상태입니다. stop 옵션을 이용하여 종료 후 재시작 하여 주시기 바랍니다\n", argv[1]);
     }
-    result = mysql_store_result(connection);
-    query = mysql_num_rows(result);
-    
-    if(query == 0)
-        printf("DHCP IS NOT RUNNING\n");
     else
-        printf("DHCP IS RUNNING\n");
+        printf("STATUS: \033[32m Active (RUNNING) \033[0m\n");
     
-    }
-
     return;
 }
 
@@ -481,8 +477,11 @@ void dhcp_start(char *argv[])
     while(1) {    
         //연결이 끊긴 패킷이라도 테이블에 남아있을 수 있기 때문   
         checking_ip_time();
-      //  if(dhcp_islive(argv) == FALSE)
-         //   continue;
+        if(dhcp_islive(argv) == ERROR)
+        {
+            fprintf(stdout, "에러 원인: %s에 대한 DHCP SERVICE가 예상치 못하게 종료된 상태입니다. stop 옵션을 이용하여 종료 후 재시작 하여 주시기 바랍니다\n", argv[1]);
+            continue;
+        }
 
         str_len = recvfrom(server_socket, buff_rcv , BUFF_SIZE, 0, (struct sockaddr *)&client_addr, &client_size);  
         //SETTING NIC DEVICE
@@ -780,15 +779,18 @@ int is_setting(char *argv[])
 int daemon_start(char *argv[])
 {
     pid_t pid; int fd;  int pid_value;
-    
+    if(dhcp_islive(argv) == ERROR)
+    {
+        fprintf(stdout, "에러 원인: %s에 대한 DHCP SERVICE가 예상치 못하게 종료된 상태입니다. stop 옵션을 이용하여 종료 후 재시작 하여 주시기 바랍니다\n", argv[1]);
+        exit(0);
+    }
+
     if((pid = fork()) < 0)
         return -1;
     else if(pid != 0) 
         exit(0);
     //이미 실행중인지 여부 판단
-   // if(dhcp_islive(argv) == FALSE)
-      //  exit(0);
-    sprintf(buf, "SELECT NIC FROM pid_table WHERE NIC = '%s' LIMIT 1", argv[1]);
+   sprintf(buf, "SELECT NIC FROM pid_table WHERE NIC = '%s' LIMIT 1", argv[1]);
     mysql_query(connection, buf);
     result = mysql_store_result(connection);
     query = mysql_num_rows(result);
